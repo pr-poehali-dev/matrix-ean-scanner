@@ -1,9 +1,14 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import Icon from '@/components/ui/icon';
 import ScannerView from '@/components/ScannerView';
 import HistoryView, { ScanRecord } from '@/components/HistoryView';
 import SettingsView, { AppSettings } from '@/components/SettingsView';
 import DashboardView from '@/components/DashboardView';
+import {
+  saveRecords, loadRecords,
+  saveSettings, loadSettings,
+  useAutoRetry,
+} from '@/hooks/useOfflineStorage';
 
 type Tab = 'dashboard' | 'scanner' | 'history' | 'settings';
 
@@ -29,38 +34,53 @@ const tabs: { id: Tab; label: string; icon: string }[] = [
   { id: 'settings', label: 'Настройки', icon: 'Settings2' },
 ];
 
-let idCounter = 1;
+const idCounter = 1;
 
 export default function Index() {
   const [activeTab, setActiveTab] = useState<Tab>('scanner');
-  const [records, setRecords] = useState<ScanRecord[]>([]);
-  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [records, setRecords] = useState<ScanRecord[]>(() => loadRecords());
+  const [settings, setSettings] = useState<AppSettings>(() => loadSettings(defaultSettings));
   const [isScanning, setIsScanning] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'checking'>('disconnected');
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const idRef = useRef(idCounter);
+
+  useEffect(() => {
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+  }, []);
+
+  // Сохраняем записи при каждом изменении
+  useEffect(() => { saveRecords(records); }, [records]);
+
+  // Сохраняем настройки при каждом изменении
+  useEffect(() => { saveSettings(settings); }, [settings]);
 
   const sendToServer = useCallback(async (code: string): Promise<'confirmed' | 'rejected'> => {
-    if (!settings.serverIp) return 'rejected';
+    if (!settings.serverIp || !navigator.onLine) return 'rejected';
     try {
       const res = await fetch(SYNC_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          codes: [{ id: String(idCounter), code }],
+          codes: [{ id: String(idRef.current), code }],
           server_ip: settings.serverIp,
           server_port: settings.serverPort,
           api_path: settings.apiPath,
         }),
       });
       const data = await res.json();
-      if (data.ok) return 'confirmed';
-      return 'rejected';
+      return data.ok ? 'confirmed' : 'rejected';
     } catch {
       return 'rejected';
     }
   }, [settings]);
 
   const handleCodeDetected = useCallback(async (code: string): Promise<'confirmed' | 'rejected'> => {
-    const recordId = String(idCounter++);
+    const recordId = String(idRef.current++);
     const newRecord: ScanRecord = {
       id: recordId,
       code,
@@ -70,6 +90,11 @@ export default function Index() {
     };
     setRecords(prev => [newRecord, ...prev]);
 
+    if (!navigator.onLine || !settings.serverIp) {
+      setRecords(prev => prev.map(r => r.id === recordId ? { ...r, status: 'error' } : r));
+      return 'rejected';
+    }
+
     const result = await sendToServer(code);
     setRecords(prev =>
       prev.map(r => r.id === recordId
@@ -78,24 +103,7 @@ export default function Index() {
       )
     );
     return result;
-  }, [sendToServer]);
-
-  const handleTestConnection = useCallback(async () => {
-    if (!settings.serverIp) {
-      setConnectionStatus('disconnected');
-      return;
-    }
-    setConnectionStatus('checking');
-    try {
-      const res = await fetch(
-        `${SYNC_URL}?server_ip=${encodeURIComponent(settings.serverIp)}&server_port=${settings.serverPort}&api_path=/api/v1/ping`
-      );
-      const data = await res.json();
-      setConnectionStatus(data.ok ? 'connected' : 'disconnected');
-    } catch {
-      setConnectionStatus('disconnected');
-    }
-  }, [settings.serverIp, settings.serverPort]);
+  }, [sendToServer, settings.serverIp]);
 
   const handleRetrySync = useCallback(async (id: string) => {
     const record = records.find(r => r.id === id);
@@ -109,6 +117,23 @@ export default function Index() {
       )
     );
   }, [records, sendToServer]);
+
+  // Автоповтор при восстановлении сети
+  useAutoRetry(records, handleRetrySync, settings.autoSync);
+
+  const handleTestConnection = useCallback(async () => {
+    if (!settings.serverIp) { setConnectionStatus('disconnected'); return; }
+    setConnectionStatus('checking');
+    try {
+      const res = await fetch(
+        `${SYNC_URL}?server_ip=${encodeURIComponent(settings.serverIp)}&server_port=${settings.serverPort}&api_path=/api/v1/ping`
+      );
+      const data = await res.json();
+      setConnectionStatus(data.ok ? 'connected' : 'disconnected');
+    } catch {
+      setConnectionStatus('disconnected');
+    }
+  }, [settings.serverIp, settings.serverPort]);
 
   const handleExport = useCallback(() => {
     const lines = ['Код;Время;Статус', ...records.map(r =>
@@ -124,8 +149,9 @@ export default function Index() {
   }, [records]);
 
   const handleClear = useCallback(() => setRecords([]), []);
-
   const serverReady = !!settings.serverIp;
+
+  const pendingCount = records.filter(r => r.status === 'pending' || r.status === 'error').length;
 
   return (
     <div className="min-h-screen bg-background flex flex-col max-w-lg mx-auto relative">
@@ -134,17 +160,29 @@ export default function Index() {
           <h1 className="text-lg font-semibold text-foreground tracking-tight">ScanPro</h1>
           <p className="text-xs text-muted-foreground">Инвентаризация · 1С</p>
         </div>
-        <div className="flex items-center gap-2 bg-card border border-border rounded-full px-3 py-1.5">
-          <span className={`status-dot ${
-            connectionStatus === 'connected' ? 'online'
-            : connectionStatus === 'checking' ? 'syncing'
-            : 'offline'
-          }`} />
-          <span className="text-xs text-muted-foreground">
-            {connectionStatus === 'connected' ? '1С онлайн'
-            : connectionStatus === 'checking' ? 'Проверка...'
-            : 'Офлайн'}
-          </span>
+        <div className="flex items-center gap-2">
+          {!isOnline && (
+            <div className="flex items-center gap-1.5 bg-[hsl(var(--scan-amber)/0.15)] border border-[hsl(var(--scan-amber)/0.3)] rounded-full px-3 py-1.5 animate-fade-in">
+              <Icon name="WifiOff" size={12} className="text-[hsl(var(--scan-amber))]" />
+              <span className="text-xs text-[hsl(var(--scan-amber))] font-medium">
+                Офлайн{pendingCount > 0 ? ` · ${pendingCount} в очереди` : ''}
+              </span>
+            </div>
+          )}
+          {isOnline && (
+            <div className="flex items-center gap-2 bg-card border border-border rounded-full px-3 py-1.5">
+              <span className={`status-dot ${
+                connectionStatus === 'connected' ? 'online'
+                : connectionStatus === 'checking' ? 'syncing'
+                : 'offline'
+              }`} />
+              <span className="text-xs text-muted-foreground">
+                {connectionStatus === 'connected' ? '1С онлайн'
+                : connectionStatus === 'checking' ? 'Проверка...'
+                : 'Нет 1С'}
+              </span>
+            </div>
+          )}
         </div>
       </header>
 
