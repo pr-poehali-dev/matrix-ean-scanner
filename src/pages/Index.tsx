@@ -9,6 +9,7 @@ import {
   saveSettings, loadSettings,
   useAutoRetry,
 } from '@/hooks/useOfflineStorage';
+import { exportTXT, exportCSV } from '@/lib/export1c';
 
 type Tab = 'dashboard' | 'scanner' | 'history' | 'settings';
 
@@ -135,18 +136,8 @@ export default function Index() {
     }
   }, [settings.serverIp, settings.serverPort]);
 
-  const handleExport = useCallback(() => {
-    const lines = ['Код;Время;Статус', ...records.map(r =>
-      `${r.code};${r.timestamp.toLocaleString('ru-RU')};${r.status}`
-    )];
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `scan_${new Date().toISOString().split('T')[0]}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [records]);
+  const handleExport = useCallback(() => exportCSV(records), [records]);
+  const handleExportTXT = useCallback(() => exportTXT(records), [records]);
 
   const handleClear = useCallback(() => setRecords([]), []);
   const serverReady = !!settings.serverIp;
@@ -187,7 +178,7 @@ export default function Index() {
       </header>
 
       {activeTab === 'scanner' && (
-        <div className="px-5 mb-3">
+        <div className="px-5 mb-3 flex flex-col gap-2">
           <button
             onClick={() => setIsScanning(s => !s)}
             className={`w-full flex items-center justify-center gap-2.5 py-3.5 rounded-xl font-medium text-sm transition-all active:scale-95 ${
@@ -199,6 +190,25 @@ export default function Index() {
             <Icon name={isScanning ? 'Square' : 'ScanLine'} size={18} />
             {isScanning ? 'Остановить сканирование' : 'Начать сканирование'}
           </button>
+
+          {records.length > 0 && (
+            <div className="flex gap-2 animate-fade-in">
+              <button
+                onClick={handleExportTXT}
+                className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl border border-border text-sm text-muted-foreground hover:text-foreground hover:border-primary/40 transition-all active:scale-95"
+              >
+                <Icon name="FileText" size={15} />
+                Выгрузить TXT для 1С
+              </button>
+              <button
+                onClick={handleExport}
+                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-border text-sm text-muted-foreground hover:text-foreground hover:border-primary/40 transition-all active:scale-95"
+              >
+                <Icon name="Table" size={15} />
+                CSV
+              </button>
+            </div>
+          )}
         </div>
       )}
 
