@@ -1,0 +1,27 @@
+{
+  "name": "ScanPro — Сканер штрихкодов",
+  "short_name": "ScanPro",
+  "description": "Сканер штрихкодов с синхронизацией 1С",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "https://cdn.poehali.dev/projects/00a031e3-86df-4e9b-9b9f-5696eee85b38/files/d103a166-a8dd-4e4a-80ef-162d89b55b57.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "https://cdn.poehali.dev/projects/00a031e3-86df-4e9b-9b9f-5696eee85b38/files/d103a166-a8dd-4e4a-80ef-162d89b55b57.jpg",
+      "sizes": "192x192",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ],
+  "categories": ["productivity", "utilities"],
+  "screenshots": []
+}
