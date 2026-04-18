@@ -22,19 +22,6 @@ interface ScannerViewProps {
   vibrateEnabled: boolean;
 }
 
-class CodeCooldownSet {
-  private map = new Map<string, number>();
-  private ttl: number;
-  constructor(ttl = 3000) { this.ttl = ttl; }
-  has(code: string) {
-    const ts = this.map.get(code);
-    if (!ts) return false;
-    if (Date.now() - ts > this.ttl) { this.map.delete(code); return false; }
-    return true;
-  }
-  add(code: string) { this.map.set(code, Date.now()); }
-}
-
 declare global {
   interface Window {
     BarcodeDetector: new (opts: { formats: string[] }) => {
@@ -43,36 +30,108 @@ declare global {
   }
 }
 
-// Цвета рамок по статусу кода
-const BOX_COLORS: Record<string, string> = {};
+const GREEN = '#22c55e';
+const AMBER = '#f59e0b';
+const RED   = '#ef4444';
 
-export default function ScannerView({ onCodeDetected, isActive, serverReady, beepEnabled, beepVolume, vibrateEnabled }: ScannerViewProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const rafRef = useRef<number>(0);
-  const cooldown = useRef(new CodeCooldownSet(3000));
-  const processingSet = useRef(new Set<string>());
-  const lastBarcodesRef = useRef<DetectedBarcode[]>([]);
+const FORMATS = [
+  'ean_13','ean_8','code_128','code_39','code_93',
+  'qr_code','data_matrix','upc_a','upc_e','itf','codabar',
+];
 
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [recentScans, setRecentScans] = useState<ScanResult[]>([]);
-  const [nativeSupported, setNativeSupported] = useState(false);
+export default function ScannerView({
+  onCodeDetected, isActive, serverReady,
+  beepEnabled, beepVolume, vibrateEnabled,
+}: ScannerViewProps) {
+  const videoRef    = useRef<HTMLVideoElement>(null);
+  const canvasRef   = useRef<HTMLCanvasElement>(null);
+  const streamRef   = useRef<MediaStream | null>(null);
+  const detectorRef = useRef<InstanceType<typeof window.BarcodeDetector> | null>(null);
+  const rafRef      = useRef<number>(0);
+
+  // Горячие структуры — без setState, чтобы не тормозить рендер
+  const cooldownMap   = useRef<Map<string, number>>(new Map());   // code → timestamp
+  const processingSet = useRef<Set<string>>(new Set());
+  const boxColors     = useRef<Map<string, string>>(new Map());   // code → цвет рамки
+  const lastBarcodes  = useRef<DetectedBarcode[]>([]);
+  const detectingRef  = useRef(false);                            // флаг: детекция в процессе
+
+  const [cameraError, setCameraError]   = useState<string | null>(null);
+  const [recentScans, setRecentScans]   = useState<ScanResult[]>([]);
+  const [nativeOk, setNativeOk]         = useState(false);
   const { beep } = useBeep();
 
-  const handleCode = useCallback(async (code: string) => {
-    if (cooldown.current.has(code)) return;
-    if (processingSet.current.has(code)) return;
-    cooldown.current.add(code);
-    processingSet.current.add(code);
+  // ─── Отрисовка рамок на canvas ───────────────────────────────────────────
+  const drawOverlay = useCallback((barcodes: DetectedBarcode[]) => {
+    const canvas = canvasRef.current;
+    const video  = videoRef.current;
+    if (!canvas || !video) return;
 
-    BOX_COLORS[code] = '#f59e0b'; // amber пока отправляем
+    const cw = canvas.clientWidth;
+    const ch = canvas.clientHeight;
+    // Сбрасываем размер только если изменился
+    if (canvas.width !== cw)  canvas.width  = cw;
+    if (canvas.height !== ch) canvas.height = ch;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cw, ch);
+
+    const vw = video.videoWidth  || cw;
+    const vh = video.videoHeight || ch;
+    const sx = cw / vw;
+    const sy = ch / vh;
+
+    barcodes.forEach(b => {
+      const color = boxColors.current.get(b.rawValue) ?? GREEN;
+      const pts   = b.cornerPoints;
+
+      ctx.beginPath();
+      if (pts?.length === 4) {
+        ctx.moveTo(pts[0].x * sx, pts[0].y * sy);
+        pts.slice(1).forEach(p => ctx.lineTo(p.x * sx, p.y * sy));
+      } else {
+        const { x, y, width, height } = b.boundingBox;
+        ctx.rect(x * sx, y * sy, width * sx, height * sy);
+      }
+      ctx.closePath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth   = 2.5;
+      ctx.stroke();
+      ctx.fillStyle = color + '28';
+      ctx.fill();
+
+      // Подпись
+      const lx = (pts?.[0]?.x ?? b.boundingBox.x) * sx;
+      const ly = (pts?.[0]?.y ?? b.boundingBox.y) * sy - 7;
+      const label = b.rawValue.length > 18 ? b.rawValue.slice(0, 16) + '…' : b.rawValue;
+      ctx.font = 'bold 11px monospace';
+      const tw  = ctx.measureText(label).width;
+      ctx.fillStyle = color;
+      ctx.fillRect(lx - 2, ly - 13, tw + 8, 16);
+      ctx.fillStyle = '#000';
+      ctx.fillText(label, lx + 2, ly);
+    });
+  }, []);
+
+  // ─── Обработка одного найденного кода ─────────────────────────────────────
+  const handleCode = useCallback(async (code: string) => {
+    const now = Date.now();
+    const last = cooldownMap.current.get(code) ?? 0;
+    if (now - last < 3000) return;                 // кулдаун 3с
+    if (processingSet.current.has(code)) return;
+
+    cooldownMap.current.set(code, now);
+    processingSet.current.add(code);
+    boxColors.current.set(code, AMBER);
+
     setRecentScans(prev => [{ code, status: 'sending' }, ...prev.slice(0, 4)]);
     if (vibrateEnabled && navigator.vibrate) navigator.vibrate(40);
 
     try {
       const result = await onCodeDetected(code);
-      BOX_COLORS[code] = result === 'confirmed' ? '#22c55e' : '#ef4444';
+      const color  = result === 'confirmed' ? GREEN : RED;
+      boxColors.current.set(code, color);
       setRecentScans(prev =>
         prev.map(r => r.code === code && r.status === 'sending' ? { code, status: result } : r)
       );
@@ -80,102 +139,34 @@ export default function ScannerView({ onCodeDetected, isActive, serverReady, bee
       if (vibrateEnabled && navigator.vibrate) {
         navigator.vibrate(result === 'confirmed' ? [60] : [80, 60, 80]);
       }
-      // Через 2с убираем цвет чтобы снова можно было сканировать
-      setTimeout(() => { delete BOX_COLORS[code]; }, 2000);
     } finally {
       processingSet.current.delete(code);
+      // Убираем рамку через 2с
+      setTimeout(() => boxColors.current.delete(code), 2000);
     }
   }, [onCodeDetected, beepEnabled, beepVolume, vibrateEnabled, beep]);
 
-  // Рисуем рамки поверх видео на canvas
-  const drawOverlay = useCallback((barcodes: DetectedBarcode[]) => {
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video) return;
-
-    const vw = video.videoWidth || video.clientWidth;
-    const vh = video.videoHeight || video.clientHeight;
-    const cw = canvas.clientWidth;
-    const ch = canvas.clientHeight;
-
-    canvas.width = cw;
-    canvas.height = ch;
-
-    const scaleX = cw / vw;
-    const scaleY = ch / vh;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, cw, ch);
-
-    barcodes.forEach(b => {
-      const color = BOX_COLORS[b.rawValue] || '#22c55e';
-      const pts = b.cornerPoints;
-
-      if (pts && pts.length === 4) {
-        // Рисуем точный полигон по угловым точкам
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x * scaleX, pts[0].y * scaleY);
-        for (let i = 1; i < pts.length; i++) {
-          ctx.lineTo(pts[i].x * scaleX, pts[i].y * scaleY);
-        }
-        ctx.closePath();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-
-        // Полупрозрачная заливка
-        ctx.fillStyle = color + '22';
-        ctx.fill();
-
-        // Метка с кодом
-        const labelX = pts[0].x * scaleX;
-        const labelY = pts[0].y * scaleY - 8;
-        const shortCode = b.rawValue.length > 16 ? b.rawValue.slice(0, 14) + '…' : b.rawValue;
-
-        ctx.font = 'bold 11px monospace';
-        const textW = ctx.measureText(shortCode).width;
-        ctx.fillStyle = color;
-        ctx.fillRect(labelX - 2, labelY - 13, textW + 8, 16);
-        ctx.fillStyle = '#000';
-        ctx.fillText(shortCode, labelX + 2, labelY);
-      } else {
-        // Fallback: просто bounding box
-        const { x, y, width, height } = b.boundingBox;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2.5;
-        ctx.strokeRect(x * scaleX, y * scaleY, width * scaleX, height * scaleY);
-        ctx.fillStyle = color + '22';
-        ctx.fillRect(x * scaleX, y * scaleY, width * scaleX, height * scaleY);
-      }
-    });
-  }, []);
-
+  // ─── Основной цикл: RAF для рисования + детекция параллельно ─────────────
   useEffect(() => {
     if (!isActive) {
       cancelAnimationFrame(rafRef.current);
       streamRef.current?.getTracks().forEach(t => t.stop());
       streamRef.current = null;
-      lastBarcodesRef.current = [];
-      const canvas = canvasRef.current;
-      if (canvas) canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+      detectingRef.current = false;
+      lastBarcodes.current = [];
+      const ctx = canvasRef.current?.getContext('2d');
+      if (ctx && canvasRef.current) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
       return;
     }
 
-    let detector: InstanceType<typeof window.BarcodeDetector> | null = null;
-    let active = true;
+    let alive = true;
 
-    const FORMATS = [
-      'ean_13', 'ean_8', 'code_128', 'code_39', 'code_93',
-      'qr_code', 'data_matrix', 'upc_a', 'upc_e', 'itf',
-    ];
-
-    const startCamera = async () => {
+    const start = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
         });
-        if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
+        if (!alive) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -183,93 +174,65 @@ export default function ScannerView({ onCodeDetected, isActive, serverReady, bee
         }
 
         if ('BarcodeDetector' in window) {
-          detector = new window.BarcodeDetector({ formats: FORMATS });
-          setNativeSupported(true);
+          detectorRef.current = new window.BarcodeDetector({ formats: FORMATS });
+          setNativeOk(true);
         }
 
-        scanLoop();
+        // RAF-цикл: только рисование, НЕ блокируется детекцией
+        const drawLoop = () => {
+          if (!alive) return;
+          drawOverlay(lastBarcodes.current);
+          rafRef.current = requestAnimationFrame(drawLoop);
+        };
+        drawLoop();
+
+        // Детекция в отдельном цикле через setTimeout(0) — не блокирует рисование
+        const detectLoop = async () => {
+          if (!alive) return;
+          const video    = videoRef.current;
+          const detector = detectorRef.current;
+          if (video && video.readyState >= 2 && detector && !detectingRef.current) {
+            detectingRef.current = true;
+            try {
+              const barcodes = await detector.detect(video);
+              lastBarcodes.current = barcodes;
+              // Запускаем обработку каждого кода параллельно
+              barcodes.forEach(b => { if (b.rawValue) handleCode(b.rawValue); });
+            } finally {
+              detectingRef.current = false;
+            }
+          }
+          if (alive) setTimeout(detectLoop, 0); // сразу следующий кадр
+        };
+        detectLoop();
+
       } catch {
         setCameraError('Нет доступа к камере');
       }
     };
 
-    const scanLoop = async () => {
-      if (!active || !videoRef.current) return;
-      const video = videoRef.current;
-
-      if (video.readyState >= 2 && detector) {
-        try {
-          const barcodes = await detector.detect(video);
-          lastBarcodesRef.current = barcodes;
-          drawOverlay(barcodes);
-          barcodes.forEach(b => { if (b.rawValue) handleCode(b.rawValue); });
-        } catch {
-          // пропускаем
-        }
-      } else if (video.readyState >= 2 && !detector) {
-        // Fallback без рамок — ZXing
-        try {
-          const { BrowserMultiFormatReader, NotFoundException } = await import('@zxing/library');
-          const reader = new BrowserMultiFormatReader();
-          const canvas = document.createElement('canvas');
-          canvas.width = video.videoWidth || 640;
-          canvas.height = video.videoHeight || 480;
-          const ctx2 = canvas.getContext('2d');
-          if (ctx2) {
-            ctx2.drawImage(video, 0, 0);
-            try {
-              const res = await (reader as unknown as { decodeFromCanvas(c: HTMLCanvasElement): { getText(): string } }).decodeFromCanvas(canvas);
-              if (res) handleCode(res.getText());
-            } catch (e) {
-              if (!(e instanceof NotFoundException)) { /* ignore */ }
-            }
-          }
-        } catch { /* ignore */ }
-      }
-
-      rafRef.current = requestAnimationFrame(scanLoop);
-    };
-
-    startCamera();
+    start();
 
     return () => {
-      active = false;
+      alive = false;
       cancelAnimationFrame(rafRef.current);
       streamRef.current?.getTracks().forEach(t => t.stop());
       streamRef.current = null;
+      detectorRef.current = null;
+      detectingRef.current = false;
     };
   }, [isActive, handleCode, drawOverlay]);
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="relative bg-black rounded-2xl overflow-hidden" style={{ aspectRatio: '4/3', minHeight: 260 }}>
+      <div
+        className="relative bg-black rounded-2xl overflow-hidden"
+        style={{ aspectRatio: '4/3', minHeight: 260 }}
+      >
         {isActive && !cameraError ? (
           <>
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover"
-            />
-            {/* Canvas для рамок поверх видео */}
-            <canvas
-              ref={canvasRef}
-              className="absolute inset-0 w-full h-full pointer-events-none"
-            />
-            {/* Угловые маркеры зоны сканирования */}
-            {!nativeSupported && (
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="relative w-[85%] h-[55%]">
-                  {['top-0 left-0 border-t-2 border-l-2', 'top-0 right-0 border-t-2 border-r-2',
-                    'bottom-0 left-0 border-b-2 border-l-2', 'bottom-0 right-0 border-b-2 border-r-2',
-                  ].map((cls, i) => (
-                    <span key={i} className={`absolute w-7 h-7 border-[hsl(var(--scan-green))] ${cls}`} />
-                  ))}
-                  <div className="scan-line" />
-                </div>
-              </div>
-            )}
+            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+            <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
           </>
         ) : cameraError ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -287,7 +250,9 @@ export default function ScannerView({ onCodeDetected, isActive, serverReady, bee
         <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/60 rounded-lg px-3 py-1.5 backdrop-blur-sm">
           <span className={`status-dot ${isActive && !cameraError ? 'online' : 'offline'}`} />
           <span className="text-xs text-white/80">
-            {isActive && !cameraError ? (nativeSupported ? 'Мульти-скан' : 'Сканирование') : 'Остановлено'}
+            {isActive && !cameraError
+              ? nativeOk ? 'Мульти-скан' : 'Сканирование'
+              : 'Остановлено'}
           </span>
         </div>
 
@@ -318,8 +283,8 @@ export default function ScannerView({ onCodeDetected, isActive, serverReady, bee
                 : 'text-muted-foreground'
               }`}>
                 {scan.status === 'confirmed' && '✓ OK'}
-                {scan.status === 'rejected' && '✗ Нет'}
-                {scan.status === 'sending' && '...'}
+                {scan.status === 'rejected'  && '✗ Нет'}
+                {scan.status === 'sending'   && '...'}
               </span>
             </div>
           ))}
@@ -327,33 +292,27 @@ export default function ScannerView({ onCodeDetected, isActive, serverReady, bee
       )}
 
       <p className="text-xs text-center text-muted-foreground">
-        {nativeSupported ? 'Рамка подсвечивает каждый найденный код' : 'Наведите камеру на штрихкод'}
+        {nativeOk ? 'Рамка подсвечивает каждый найденный код' : 'Наведите камеру на штрихкод'}
       </p>
     </div>
   );
 }
 
 function StatusSquare({ status }: { status: ScanResult['status'] }) {
-  if (status === 'sending') {
-    return (
-      <div className="w-7 h-7 rounded-lg bg-muted flex items-center justify-center flex-shrink-0">
-        <div className="w-3 h-3 rounded-sm border-2 border-muted-foreground border-t-transparent animate-spin" />
-      </div>
-    );
-  }
-  if (status === 'confirmed') {
-    return (
-      <div className="w-7 h-7 rounded-lg bg-[hsl(var(--scan-green))] flex items-center justify-center flex-shrink-0 shadow-[0_0_10px_hsl(var(--scan-green)/0.4)]">
-        <Icon name="Check" size={14} className="text-black" />
-      </div>
-    );
-  }
-  if (status === 'rejected') {
-    return (
-      <div className="w-7 h-7 rounded-lg bg-[hsl(var(--scan-red))] flex items-center justify-center flex-shrink-0 shadow-[0_0_10px_hsl(var(--scan-red)/0.4)]">
-        <Icon name="X" size={14} className="text-white" />
-      </div>
-    );
-  }
+  if (status === 'sending') return (
+    <div className="w-7 h-7 rounded-lg bg-muted flex items-center justify-center flex-shrink-0">
+      <div className="w-3 h-3 border-2 border-muted-foreground border-t-transparent rounded-sm animate-spin" />
+    </div>
+  );
+  if (status === 'confirmed') return (
+    <div className="w-7 h-7 rounded-lg bg-[hsl(var(--scan-green))] flex items-center justify-center flex-shrink-0 shadow-[0_0_10px_hsl(var(--scan-green)/0.4)]">
+      <Icon name="Check" size={14} className="text-black" />
+    </div>
+  );
+  if (status === 'rejected') return (
+    <div className="w-7 h-7 rounded-lg bg-[hsl(var(--scan-red))] flex items-center justify-center flex-shrink-0 shadow-[0_0_10px_hsl(var(--scan-red)/0.4)]">
+      <Icon name="X" size={14} className="text-white" />
+    </div>
+  );
   return null;
 }
