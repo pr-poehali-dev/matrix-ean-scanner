@@ -9,6 +9,7 @@ export interface AppSettings {
   autoSync: boolean;
   syncInterval: number;
   beepOnScan: boolean;
+  beepVolume: number;
   vibrate: boolean;
   scanDelay: number;
 }
@@ -134,6 +135,28 @@ export default function SettingsView({ settings, onChange, connectionStatus, onT
         <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Параметры сканирования</h3>
         <div className="bg-card border border-border rounded-xl overflow-hidden divide-y divide-border">
           <ToggleRow label="Звук при сканировании" value={settings.beepOnScan} onChange={v => update('beepOnScan', v)} />
+          {settings.beepOnScan && (
+            <div className="px-4 py-3 animate-fade-in">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Icon name={settings.beepVolume === 0 ? 'VolumeX' : settings.beepVolume < 0.5 ? 'Volume1' : 'Volume2'} size={14} className="text-muted-foreground" />
+                  <span className="text-sm text-foreground">Громкость звука</span>
+                </div>
+                <span className="text-xs font-mono text-muted-foreground">{Math.round(settings.beepVolume * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min={0} max={1} step={0.05}
+                value={settings.beepVolume}
+                onChange={e => update('beepVolume', Number(e.target.value))}
+                className="w-full accent-[hsl(var(--scan-green))]"
+              />
+              <div className="flex justify-between mt-1">
+                <span className="text-xs text-muted-foreground">Выкл</span>
+                <span className="text-xs text-muted-foreground">Макс</span>
+              </div>
+            </div>
+          )}
           <ToggleRow label="Вибрация" value={settings.vibrate} onChange={v => update('vibrate', v)} />
           <div className="px-4 py-3">
             <div className="flex items-center justify-between mb-2">

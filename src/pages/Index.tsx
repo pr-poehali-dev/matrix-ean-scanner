@@ -17,6 +17,7 @@ const defaultSettings: AppSettings = {
   autoSync: true,
   syncInterval: 15,
   beepOnScan: true,
+  beepVolume: 0.7,
   vibrate: true,
   scanDelay: 500,
 };
@@ -181,6 +182,9 @@ export default function Index() {
               onCodeDetected={handleCodeDetected}
               isActive={isScanning}
               serverReady={serverReady}
+              beepEnabled={settings.beepOnScan}
+              beepVolume={settings.beepVolume}
+              vibrateEnabled={settings.vibrate}
             />
           )}
           {activeTab === 'history' && (

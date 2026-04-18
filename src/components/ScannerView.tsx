@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { BrowserMultiFormatReader, NotFoundException } from '@zxing/library';
 import Icon from '@/components/ui/icon';
+import { useBeep } from '@/hooks/useBeep';
 
 interface ScanResult {
   code: string;
@@ -11,9 +12,12 @@ interface ScannerViewProps {
   onCodeDetected: (code: string) => Promise<'confirmed' | 'rejected'>;
   isActive: boolean;
   serverReady: boolean;
+  beepEnabled: boolean;
+  beepVolume: number;
+  vibrateEnabled: boolean;
 }
 
-export default function ScannerView({ onCodeDetected, isActive, serverReady }: ScannerViewProps) {
+export default function ScannerView({ onCodeDetected, isActive, serverReady, beepEnabled, beepVolume, vibrateEnabled }: ScannerViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const readerRef = useRef<BrowserMultiFormatReader | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -22,6 +26,7 @@ export default function ScannerView({ onCodeDetected, isActive, serverReady }: S
   const [isProcessing, setIsProcessing] = useState(false);
   const lastCodeRef = useRef<string | null>(null);
   const cooldownRef = useRef(false);
+  const { beep } = useBeep();
 
   const handleDetected = useCallback(async (code: string) => {
     if (cooldownRef.current || isProcessing) return;
@@ -32,11 +37,17 @@ export default function ScannerView({ onCodeDetected, isActive, serverReady }: S
     setIsProcessing(true);
     setLastScan({ code, status: 'sending' });
 
+    if (vibrateEnabled && navigator.vibrate) navigator.vibrate(40);
+
     try {
       const result = await onCodeDetected(code);
       setLastScan({ code, status: result });
       setFlashColor(result === 'confirmed' ? 'green' : 'red');
       setTimeout(() => setFlashColor(null), 600);
+      if (beepEnabled) beep(result, beepVolume);
+      if (vibrateEnabled && navigator.vibrate) {
+        navigator.vibrate(result === 'confirmed' ? [60] : [80, 60, 80]);
+      }
     } finally {
       setIsProcessing(false);
       setTimeout(() => {
@@ -44,7 +55,7 @@ export default function ScannerView({ onCodeDetected, isActive, serverReady }: S
         lastCodeRef.current = null;
       }, 1500);
     }
-  }, [isProcessing, onCodeDetected]);
+  }, [isProcessing, onCodeDetected, beepEnabled, beepVolume, vibrateEnabled, beep]);
 
   useEffect(() => {
     if (!isActive || !videoRef.current) return;
