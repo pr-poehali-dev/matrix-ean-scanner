@@ -7,8 +7,10 @@ import DashboardView from '@/components/DashboardView';
 
 type Tab = 'dashboard' | 'scanner' | 'history' | 'settings';
 
+const SYNC_URL = 'https://functions.poehali.dev/a967ae54-28a7-4f88-899c-130e8ffda498';
+
 const defaultSettings: AppSettings = {
-  serverIp: '192.168.1.100',
+  serverIp: '',
   serverPort: '8080',
   apiPath: '/api/v1/scan',
   wifiName: '',
@@ -35,9 +37,31 @@ export default function Index() {
   const [isScanning, setIsScanning] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'checking'>('disconnected');
 
-  const handleCodeDetected = useCallback((code: string) => {
+  const sendToServer = useCallback(async (code: string): Promise<'confirmed' | 'rejected'> => {
+    if (!settings.serverIp) return 'rejected';
+    try {
+      const res = await fetch(SYNC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          codes: [{ id: String(idCounter), code }],
+          server_ip: settings.serverIp,
+          server_port: settings.serverPort,
+          api_path: settings.apiPath,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) return 'confirmed';
+      return 'rejected';
+    } catch {
+      return 'rejected';
+    }
+  }, [settings]);
+
+  const handleCodeDetected = useCallback(async (code: string): Promise<'confirmed' | 'rejected'> => {
+    const recordId = String(idCounter++);
     const newRecord: ScanRecord = {
-      id: String(idCounter++),
+      id: recordId,
       code,
       timestamp: new Date(),
       status: 'pending',
@@ -45,29 +69,45 @@ export default function Index() {
     };
     setRecords(prev => [newRecord, ...prev]);
 
-    if (settings.autoSync && connectionStatus === 'connected') {
-      setTimeout(() => {
-        setRecords(prev =>
-          prev.map(r => r.id === newRecord.id ? { ...r, status: 'synced' } : r)
-        );
-      }, 1500);
+    const result = await sendToServer(code);
+    setRecords(prev =>
+      prev.map(r => r.id === recordId
+        ? { ...r, status: result === 'confirmed' ? 'synced' : 'error' }
+        : r
+      )
+    );
+    return result;
+  }, [sendToServer]);
+
+  const handleTestConnection = useCallback(async () => {
+    if (!settings.serverIp) {
+      setConnectionStatus('disconnected');
+      return;
     }
-  }, [settings.autoSync, connectionStatus]);
-
-  const handleTestConnection = useCallback(() => {
     setConnectionStatus('checking');
-    setTimeout(() => {
-      const success = settings.serverIp.trim().length > 0;
-      setConnectionStatus(success ? 'connected' : 'disconnected');
-    }, 1800);
-  }, [settings.serverIp]);
+    try {
+      const res = await fetch(
+        `${SYNC_URL}?server_ip=${encodeURIComponent(settings.serverIp)}&server_port=${settings.serverPort}&api_path=/api/v1/ping`
+      );
+      const data = await res.json();
+      setConnectionStatus(data.ok ? 'connected' : 'disconnected');
+    } catch {
+      setConnectionStatus('disconnected');
+    }
+  }, [settings.serverIp, settings.serverPort]);
 
-  const handleRetrySync = useCallback((id: string) => {
+  const handleRetrySync = useCallback(async (id: string) => {
+    const record = records.find(r => r.id === id);
+    if (!record) return;
     setRecords(prev => prev.map(r => r.id === id ? { ...r, status: 'pending' } : r));
-    setTimeout(() => {
-      setRecords(prev => prev.map(r => r.id === id ? { ...r, status: 'synced' } : r));
-    }, 1200);
-  }, []);
+    const result = await sendToServer(record.code);
+    setRecords(prev =>
+      prev.map(r => r.id === id
+        ? { ...r, status: result === 'confirmed' ? 'synced' : 'error' }
+        : r
+      )
+    );
+  }, [records, sendToServer]);
 
   const handleExport = useCallback(() => {
     const lines = ['Код;Время;Статус', ...records.map(r =>
@@ -82,9 +122,9 @@ export default function Index() {
     URL.revokeObjectURL(url);
   }, [records]);
 
-  const handleClear = useCallback(() => {
-    setRecords([]);
-  }, []);
+  const handleClear = useCallback(() => setRecords([]), []);
+
+  const serverReady = !!settings.serverIp;
 
   return (
     <div className="min-h-screen bg-background flex flex-col max-w-lg mx-auto relative">
@@ -94,12 +134,34 @@ export default function Index() {
           <p className="text-xs text-muted-foreground">Инвентаризация · 1С</p>
         </div>
         <div className="flex items-center gap-2 bg-card border border-border rounded-full px-3 py-1.5">
-          <span className={`status-dot ${connectionStatus === 'connected' ? 'online' : connectionStatus === 'checking' ? 'syncing' : 'offline'}`} />
+          <span className={`status-dot ${
+            connectionStatus === 'connected' ? 'online'
+            : connectionStatus === 'checking' ? 'syncing'
+            : 'offline'
+          }`} />
           <span className="text-xs text-muted-foreground">
-            {connectionStatus === 'connected' ? '1С онлайн' : connectionStatus === 'checking' ? 'Проверка...' : 'Офлайн'}
+            {connectionStatus === 'connected' ? '1С онлайн'
+            : connectionStatus === 'checking' ? 'Проверка...'
+            : 'Офлайн'}
           </span>
         </div>
       </header>
+
+      {activeTab === 'scanner' && (
+        <div className="px-5 mb-3">
+          <button
+            onClick={() => setIsScanning(s => !s)}
+            className={`w-full flex items-center justify-center gap-2.5 py-3.5 rounded-xl font-medium text-sm transition-all active:scale-95 ${
+              isScanning
+                ? 'bg-[hsl(var(--scan-red)/0.15)] text-[hsl(var(--scan-red))] border border-[hsl(var(--scan-red)/0.35)] hover:bg-[hsl(var(--scan-red)/0.2)]'
+                : 'bg-[hsl(var(--scan-green))] text-[hsl(220,16%,8%)] hover:opacity-90 shadow-[0_0_20px_hsl(var(--scan-green)/0.3)]'
+            }`}
+          >
+            <Icon name={isScanning ? 'Square' : 'ScanLine'} size={18} />
+            {isScanning ? 'Остановить сканирование' : 'Начать сканирование'}
+          </button>
+        </div>
+      )}
 
       <main className="flex-1 overflow-y-auto px-5 pb-24">
         <div className="animate-fade-in">
@@ -107,7 +169,7 @@ export default function Index() {
             <DashboardView
               records={records}
               connectionStatus={connectionStatus}
-              serverIp={`${settings.serverIp}:${settings.serverPort}`}
+              serverIp={settings.serverIp ? `${settings.serverIp}:${settings.serverPort}` : 'Не настроено'}
               isScanning={isScanning}
               onStartScan={() => { setIsScanning(true); setActiveTab('scanner'); }}
               onStopScan={() => setIsScanning(false)}
@@ -118,6 +180,7 @@ export default function Index() {
             <ScannerView
               onCodeDetected={handleCodeDetected}
               isActive={isScanning}
+              serverReady={serverReady}
             />
           )}
           {activeTab === 'history' && (
@@ -147,11 +210,7 @@ export default function Index() {
               <button
                 key={tab.id}
                 onClick={() => {
-                  if (tab.id === 'scanner') {
-                    setIsScanning(true);
-                  } else {
-                    setIsScanning(false);
-                  }
+                  if (tab.id !== 'scanner') setIsScanning(false);
                   setActiveTab(tab.id);
                 }}
                 className={`flex-1 flex flex-col items-center gap-1 py-3 transition-all relative ${

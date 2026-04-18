@@ -1,0 +1,36 @@
+{
+  "tests": [
+    {
+      "name": "OPTIONS preflight",
+      "method": "OPTIONS",
+      "path": "/",
+      "expectedStatus": 200
+    },
+    {
+      "name": "Missing server_ip returns 400",
+      "method": "POST",
+      "path": "/",
+      "body": {"codes": [{"id": "1", "code": "4607036192199"}]},
+      "expectedStatus": 400,
+      "expectedBody": {"ok": false},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Missing codes returns 400",
+      "method": "POST",
+      "path": "/",
+      "body": {"server_ip": "192.168.1.1", "codes": []},
+      "expectedStatus": 400,
+      "expectedBody": {"ok": false},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Connection check - missing ip",
+      "method": "GET",
+      "path": "/?server_ip=",
+      "expectedStatus": 400,
+      "expectedBody": {"ok": false},
+      "bodyMatcher": "partial"
+    }
+  ]
+}
